@@ -535,6 +535,78 @@ output:
     expect(nodes.filter((n) => n.kind === 'group')).toHaveLength(2);
     expect(nodes.filter((n) => n.kind === 'leaf')).toHaveLength(6);
   });
+
+  describe('redpanda missing config flags', () => {
+    it('sets missingTopic on redpanda_common input with empty topics', () => {
+      const yaml = 'input:\n  redpanda_common:\n    topics: []';
+      const { nodes } = parsePipelineFlowTree(yaml);
+      const input = nodes.find((n) => n.id === 'input-0');
+      expect(input).toMatchObject({ label: 'redpanda_common', missingTopic: true });
+    });
+
+    it('sets missingSasl on kafka_franz input without sasl config', () => {
+      const yaml = 'input:\n  kafka_franz:\n    seed_brokers: ["localhost:9092"]\n    topics: ["test"]';
+      const { nodes } = parsePipelineFlowTree(yaml);
+      const input = nodes.find((n) => n.id === 'input-0');
+      expect(input).toMatchObject({ label: 'kafka_franz', missingSasl: true });
+      expect(input?.missingTopic).toBeUndefined();
+    });
+
+    it('does not set missingSasl when component-level sasl is configured', () => {
+      const yaml =
+        'input:\n  kafka_franz:\n    seed_brokers: ["localhost:9092"]\n    topics: ["test"]\n    sasl:\n      - mechanism: SCRAM-SHA-256';
+      const { nodes } = parsePipelineFlowTree(yaml);
+      const input = nodes.find((n) => n.id === 'input-0');
+      expect(input?.missingSasl).toBeUndefined();
+    });
+
+    it('does not set missingSasl when root-level redpanda.sasl is configured', () => {
+      const yaml =
+        'redpanda:\n  sasl:\n    - mechanism: SCRAM-SHA-256\ninput:\n  redpanda_common:\n    topics: ["test"]';
+      const { nodes } = parsePipelineFlowTree(yaml);
+      const input = nodes.find((n) => n.id === 'input-0');
+      expect(input?.missingSasl).toBeUndefined();
+    });
+
+    it('does not set flags on non-redpanda components', () => {
+      const yaml = 'input:\n  http_client:\n    url: http://example.com';
+      const { nodes } = parsePipelineFlowTree(yaml);
+      const input = nodes.find((n) => n.id === 'input-0');
+      expect(input?.missingTopic).toBeUndefined();
+      expect(input?.missingSasl).toBeUndefined();
+    });
+
+    it('sets flags on redpanda output nodes', () => {
+      const yaml = 'output:\n  kafka_franz:\n    seed_brokers: ["localhost:9092"]';
+      const { nodes } = parsePipelineFlowTree(yaml);
+      const output = nodes.find((n) => n.id === 'output-0');
+      expect(output).toMatchObject({ missingTopic: true, missingSasl: true });
+    });
+
+    it('sets both flags when topic and sasl are both missing', () => {
+      const yaml = 'input:\n  redpanda_common: {}';
+      const { nodes } = parsePipelineFlowTree(yaml);
+      const input = nodes.find((n) => n.id === 'input-0');
+      expect(input).toMatchObject({ missingTopic: true, missingSasl: true });
+    });
+
+    it('clears missingTopic when topics are present', () => {
+      const yaml = 'input:\n  kafka_franz:\n    topics: ["my-topic"]';
+      const { nodes } = parsePipelineFlowTree(yaml);
+      const input = nodes.find((n) => n.id === 'input-0');
+      expect(input?.missingTopic).toBeUndefined();
+      expect(input?.topics).toEqual(['my-topic']);
+    });
+
+    it('passes missingTopic/missingSasl through to layout rfNode data', () => {
+      const yaml = 'input:\n  redpanda_common: {}';
+      const { nodes } = parsePipelineFlowTree(yaml);
+      const { rfNodes } = computeTreeLayout(nodes);
+      const inputRfNode = rfNodes.find((n) => n.id === 'input-0');
+      expect(inputRfNode?.data.missingTopic).toBe(true);
+      expect(inputRfNode?.data.missingSasl).toBe(true);
+    });
+  });
 });
 
 describe('computeTreeLayout', () => {
@@ -696,5 +768,52 @@ output:
     for (const node of rfNodes) {
       expect(node.data.mode).toBeUndefined();
     }
+  });
+
+  it('auto-collapses groups beyond MAX_NESTING_DEPTH with descendant count', () => {
+    // Triple-nested switch: depth 0=section, 1=switch, 2=case, 3=switch, 4=case, 5=switch (>=5 → auto-collapsed)
+    const yaml = [
+      'pipeline:',
+      '  processors:',
+      '    - switch:',
+      "        - check: 'this.a > 1'",
+      '          processors:',
+      '            - switch:',
+      "                - check: 'this.b > 2'",
+      '                  processors:',
+      '                    - switch:',
+      "                        - check: 'this.c > 3'",
+      '                          processors:',
+      '                            - mapping: root = this',
+    ].join('\n');
+    const { nodes } = parsePipelineFlowTree(yaml);
+    const { rfNodes } = computeTreeLayout(nodes);
+
+    // The innermost switch group (at depth >= 5) should be auto-collapsed
+    const visibleNodes = rfNodes.filter((n) => (n.style as Record<string, unknown>)?.opacity !== 0);
+    // The deeply nested mapping leaf should be hidden (opacity 0)
+    const mappingNode = rfNodes.find((n) => n.data.label === 'mapping');
+    expect(mappingNode).toBeDefined();
+    expect((mappingNode?.style as Record<string, unknown>)?.opacity).toBe(0);
+
+    // An auto-collapsed group should have collapsed=true and childCount > 0
+    const autoCollapsedGroups = visibleNodes.filter((n) => n.data.collapsed === true && n.data.childCount > 0);
+    expect(autoCollapsedGroups.length).toBeGreaterThan(0);
+  });
+
+  it('returns maxDepth tracking the deepest visual nesting level', () => {
+    const yaml = [
+      'pipeline:',
+      '  processors:',
+      '    - switch:',
+      "        - check: 'this.a > 1'",
+      '          processors:',
+      '            - mapping: root = this',
+    ].join('\n');
+    const { nodes } = parsePipelineFlowTree(yaml);
+    const { maxDepth } = computeTreeLayout(nodes);
+
+    // processors section (0) → switch group (1) → case group (2) → mapping leaf (3)
+    expect(maxDepth).toBe(3);
   });
 });

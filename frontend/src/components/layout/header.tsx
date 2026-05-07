@@ -9,15 +9,13 @@
  * by the Apache License, Version 2.0
  */
 
-'use no memo';
-
 import { Box, Button, ColorModeSwitch, CopyButton, Flex } from '@redpanda-data/ui';
 import { Link, useLocation, useMatchRoute } from '@tanstack/react-router';
 import { Heading } from 'components/redpanda-ui/components/typography';
 import { cn } from 'components/redpanda-ui/lib/utils';
 import { Fragment, useMemo } from 'react';
 
-import { isEmbedded } from '../../config';
+import { isEmbedded, isFeatureFlagEnabled } from '../../config';
 import { api, useApiStoreHook } from '../../state/backend-api';
 import { type BreadcrumbEntry, useUIStateStore } from '../../state/ui-state';
 import { IsDev } from '../../utils/env';
@@ -113,7 +111,7 @@ function AppPageHeader() {
               className={cn('mr-2', lastBreadcrumb.options?.canBeTruncated ? 'break-spaces break-all' : 'nowrap')}
               level={1}
             >
-              {lastBreadcrumb.title}
+              {lastBreadcrumb.titleNode ?? lastBreadcrumb.title}
             </Heading>
           ) : null}
           {lastBreadcrumb ? (
@@ -207,6 +205,24 @@ function useShouldShowRefresh() {
 }
 function useShouldHideHeader() {
   const { pathname } = useLocation();
+  const matchRoute = useMatchRoute();
+
+  // Hide header when PipelinePage renders (it has its own header/breadcrumbs)
+  const isPipelineRoute =
+    matchRoute({ to: '/rp-connect/$pipelineId' }) ||
+    matchRoute({ to: '/rp-connect/$pipelineId/edit' }) ||
+    matchRoute({ to: '/rp-connect/create' });
+
+  // Both flags are cloud-only (schema requires embedded mode).
+  // enablePipelineDiagrams: full new pipeline layout with diagrams.
+  // enableRpcnTiles: new tiles-based create flow embedded in legacy layout.
+  if (
+    isPipelineRoute &&
+    isEmbedded() &&
+    (isFeatureFlagEnabled('enablePipelineDiagrams') || isFeatureFlagEnabled('enableRpcnTiles'))
+  ) {
+    return true;
+  }
 
   // Only hide header in embedded mode for pages that have their own headers
   if (!isEmbedded()) {

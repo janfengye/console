@@ -9,8 +9,6 @@
  * by the Apache License, Version 2.0
  */
 
-'use no memo';
-
 import {
   Alert,
   AlertIcon,
@@ -37,7 +35,7 @@ import {
 import { useEffect, useState } from 'react';
 
 import styles from './DeleteRecordsModal.module.scss';
-import { api } from '../../../../state/backend-api';
+import { api, useApiStoreHook } from '../../../../state/backend-api';
 import type { DeleteRecordsResponseData, Partition, Topic } from '../../../../state/rest-interfaces';
 import { RadioOptionGroup } from '../../../../utils/tsx-utils';
 import { prettyNumber } from '../../../../utils/utils';
@@ -246,19 +244,22 @@ const ManualOffsetContent = ({
   onOffsetSpecified: (v: number) => void;
 }) => {
   const [sliderValue, setSliderValue] = useState(0);
+  const topicPartitionErrors = useApiStoreHook((s) => s.topicPartitionErrors.get(topicName));
+  const topicWatermarksErrors = useApiStoreHook((s) => s.topicWatermarksErrors.get(topicName));
+  const partitions = useApiStoreHook((s) => s.topicPartitions.get(topicName));
 
   const updateOffsetFromSlider = (v: number) => {
     setSliderValue(v);
     onOffsetSpecified(v);
   };
 
-  if (api.topicPartitionErrors?.get(topicName) || api.topicWatermarksErrors?.get(topicName)) {
-    const partitionErrors = api.topicPartitionErrors
-      .get(topicName)
-      ?.map(({ partitionError }) => <li key={`${topicName}-${partitionError}`}>{partitionError}</li>);
-    const waterMarksErrors = api.topicWatermarksErrors
-      .get(topicName)
-      ?.map(({ waterMarksError }) => <li key={`${topicName}-${waterMarksError}`}>{waterMarksError}</li>);
+  if (topicPartitionErrors || topicWatermarksErrors) {
+    const partitionErrors = topicPartitionErrors?.map(({ partitionError }) => (
+      <li key={`${topicName}-${partitionError}`}>{partitionError}</li>
+    ));
+    const waterMarksErrors = topicWatermarksErrors?.map(({ waterMarksError }) => (
+      <li key={`${topicName}-${waterMarksError}`}>{waterMarksError}</li>
+    ));
     const message = (
       <>
         {partitionErrors && partitionErrors.length > 0 ? (
@@ -282,8 +283,6 @@ const ManualOffsetContent = ({
       </Alert>
     );
   }
-
-  const partitions = api.topicPartitions?.get(topicName);
 
   if (!partitions) {
     return <Spinner size="lg" />;
@@ -431,7 +430,7 @@ export default function DeleteRecordsModal(props: DeleteRecordsModalProps): JSX.
   // biome-ignore lint/suspicious/noConfusingVoidType: needed to fix error TS2345
   const handleFinish = (responseData: void | DeleteRecordsResponseData | null | undefined) => {
     if (responseData === null || responseData === undefined || typeof responseData === 'undefined') {
-      setErrors(['You are not allowed to delete records on this topic. Please contact your Kafka administrator.']);
+      setErrors(['You are not allowed to delete records on this topic. Contact your Kafka administrator.']);
       return;
     }
 
@@ -443,7 +442,7 @@ export default function DeleteRecordsModal(props: DeleteRecordsModalProps): JSX.
     } else {
       onFinish();
       toast({
-        description: 'Records deleted successfully',
+        description: 'Records deleted',
         status: 'success',
       });
     }
@@ -508,14 +507,12 @@ export default function DeleteRecordsModal(props: DeleteRecordsModalProps): JSX.
             // biome-ignore lint/style/noNonNullAssertion: not touching MobX observables
             api.deleteTopicRecords(topicName, partitionOffset, specifiedPartition!)?.then(handleFinish);
           } else {
-            setErrors([
-              'No partition offset was specified, this should not happen. Please contact your administrator.',
-            ]);
+            setErrors(['No partition offset was specified. Contact your administrator.']);
           }
         }
       });
     } else {
-      setErrors(['Something went wrong, please contact your administrator.']);
+      setErrors(['Something went wrong. Contact your administrator.']);
     }
   };
 
@@ -536,7 +533,7 @@ export default function DeleteRecordsModal(props: DeleteRecordsModalProps): JSX.
             <Alert mb={2} status="error">
               <AlertIcon />
               <Flex flexDirection="column" gap={4} p={2}>
-                <Text>Errors have occurred when processing your request. Please contact your Kafka Administrator.</Text>
+                <Text>Errors occurred while processing your request. Contact your Kafka administrator.</Text>
                 <List>
                   {errors.map((e) => (
                     <ListItem key={e}>{e}</ListItem>

@@ -9,11 +9,9 @@
  * by the Apache License, Version 2.0
  */
 
-'use no memo';
-
 import React, { type FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api, createMessageSearch, type MessageSearchRequest } from '../../../../state/backend-api';
+import { api, createMessageSearch, type MessageSearchRequest, useApiStoreHook } from '../../../../state/backend-api';
 import type { Topic, TopicMessage } from '../../../../state/rest-interfaces';
 import {
   createFilterEntry,
@@ -104,6 +102,7 @@ import { appGlobal } from '../../../../state/app-global';
 import { useTopicSettingsStore } from '../../../../stores/topic-settings-store';
 import { IsDev } from '../../../../utils/env';
 import { sanitizeString, wrapFilterFragment } from '../../../../utils/filter-helper';
+import { trimSlidingWindow } from '../../../../utils/message-table-helpers';
 import { sortingParser } from '../../../../utils/sorting-parser';
 import { getTopicFilters, setTopicFilters } from '../../../../utils/topic-filters-session';
 import {
@@ -327,55 +326,8 @@ async function loadLargeMessage({
   }
 }
 
-/**
- * Pure function for sliding-window trimming of messages.
- * Keeps at most maxResults + pageSize messages in the window,
- * trimming only pages before the user's current view.
- */
-function trimSlidingWindow({
-  messages,
-  maxResults,
-  pageSize,
-  currentGlobalPage,
-  windowStartPage,
-  virtualStartIndex,
-}: {
-  messages: TopicMessage[];
-  maxResults: number;
-  pageSize: number;
-  currentGlobalPage: number;
-  windowStartPage: number;
-  virtualStartIndex: number;
-}): { messages: TopicMessage[]; windowStartPage: number; virtualStartIndex: number; trimCount: number } {
-  const maxWindowSize = maxResults + pageSize;
-
-  if (maxResults < pageSize || messages.length <= maxWindowSize) {
-    return { messages, windowStartPage, virtualStartIndex, trimCount: 0 };
-  }
-
-  const excess = messages.length - maxWindowSize;
-  const currentLocalPage = Math.max(0, currentGlobalPage - windowStartPage);
-
-  // Never trim the page the user is currently viewing or the one before it
-  const maxPagesToTrim = Math.max(0, currentLocalPage - 1);
-  const pagesToTrim = Math.min(Math.floor(excess / pageSize), maxPagesToTrim);
-  const trimCount = pagesToTrim * pageSize;
-
-  if (trimCount === 0) {
-    return { messages, windowStartPage, virtualStartIndex, trimCount: 0 };
-  }
-
-  return {
-    messages: messages.slice(trimCount),
-    windowStartPage: windowStartPage + pagesToTrim,
-    virtualStartIndex: virtualStartIndex + trimCount,
-    trimCount,
-  };
-}
-
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: this is because of the refactoring effort, the scope will be minimised eventually
 export const TopicMessageView: FC<TopicMessageViewProps> = (props) => {
-  'use no memo';
   const toast = useToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
@@ -383,6 +335,8 @@ export const TopicMessageView: FC<TopicMessageViewProps> = (props) => {
   // Zustand store for topic settings
   const { setSorting, getSorting, setTopicSettings, perTopicSettings, setSearchParams, getSearchParams } =
     useTopicSettingsStore();
+
+  const topicPermissions = useApiStoreHook((s) => s.topicPermissions.get(props.topic.topicName));
 
   // Access perTopicSettings directly to trigger re-renders when Zustand state changes
   const topicSettings = perTopicSettings.find((t) => t.topicName === props.topic.topicName);
@@ -1331,8 +1285,7 @@ export const TopicMessageView: FC<TopicMessageViewProps> = (props) => {
   });
 
   // Search controls derived state
-  const canUseFilters =
-    (api.topicPermissions.get(props.topic.topicName)?.canUseSearchFilters ?? true) && !isServerless();
+  const canUseFilters = (topicPermissions?.canUseSearchFilters ?? true) && !isServerless();
   const customStartOffsetValid = !Number.isNaN(Number(customStartOffsetValue));
 
   const startOffsetOptions = [
@@ -1723,7 +1676,7 @@ export const TopicMessageView: FC<TopicMessageViewProps> = (props) => {
           <Box>
             <AlertTitle>Backend Error</AlertTitle>
             <AlertDescription>
-              <Box>Please check and modify the request before resubmitting.</Box>
+              <Box>Check and modify the request before resubmitting.</Box>
               <Box mt="4">
                 <div className="codeBox">{(fetchError as Error).message ?? String(fetchError)}</div>
               </Box>
@@ -1814,16 +1767,7 @@ export const TopicMessageView: FC<TopicMessageViewProps> = (props) => {
           {/* Normal pagination */}
           {!continuousPaginationEnabled && filteredMessages.length > 0 && (
             <div className="pt-2">
-              <DataTablePagination
-                pagination={{
-                  canNextPage: table.getCanNextPage(),
-                  canPreviousPage: table.getCanPreviousPage(),
-                  pageCount: table.getPageCount(),
-                  pageIndex: paginationParams.pageIndex,
-                  pageSize: paginationParams.pageSize,
-                }}
-                table={table}
-              />
+              <DataTablePagination table={table} />
             </div>
           )}
 

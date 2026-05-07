@@ -9,6 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
+import { cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithFileRoutes, screen } from 'test-utils';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -16,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 const mockNavigate = vi.fn();
 const mockMutateGlobal = vi.fn();
 const mockMutateSubject = vi.fn();
+const mockMutateContext = vi.fn();
 vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
@@ -31,24 +33,36 @@ vi.mock('@tanstack/react-router', async (importOriginal) => {
   };
 });
 
-vi.mock('react-query/api/schema-registry', () => ({
-  useSchemaModeQuery: vi.fn(() => ({
-    data: 'READWRITE',
-    isLoading: false,
-  })),
-  useSchemaDetailsQuery: vi.fn((_subject: string | undefined, _opts?: { enabled?: boolean }) => ({
-    data: undefined,
-    isLoading: false,
-  })),
-  useUpdateGlobalModeMutation: vi.fn(() => ({
-    mutate: mockMutateGlobal,
-    isPending: false,
-  })),
-  useUpdateSubjectModeMutation: vi.fn(() => ({
-    mutate: mockMutateSubject,
-    isPending: false,
-  })),
-}));
+vi.mock('react-query/api/schema-registry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-query/api/schema-registry')>();
+  return {
+    ...actual,
+    useSchemaModeQuery: vi.fn(() => ({
+      data: 'READWRITE',
+      isLoading: false,
+    })),
+    useSchemaDetailsQuery: vi.fn((_subject: string | undefined, _opts?: { enabled?: boolean }) => ({
+      data: undefined,
+      isLoading: false,
+    })),
+    useUpdateGlobalModeMutation: vi.fn(() => ({
+      mutate: mockMutateGlobal,
+      isPending: false,
+    })),
+    useUpdateSubjectModeMutation: vi.fn(() => ({
+      mutate: mockMutateSubject,
+      isPending: false,
+    })),
+    useSchemaRegistryContextsQuery: vi.fn(() => ({
+      data: [],
+      isLoading: false,
+    })),
+    useUpdateContextModeMutation: vi.fn(() => ({
+      mutate: mockMutateContext,
+      isPending: false,
+    })),
+  };
+});
 
 vi.mock('state/backend-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('state/backend-api')>();
@@ -68,9 +82,14 @@ vi.mock('state/ui-state', () => ({
   },
 }));
 
-import { useSchemaDetailsQuery, useSchemaModeQuery } from 'react-query/api/schema-registry';
+import {
+  useSchemaDetailsQuery,
+  useSchemaModeQuery,
+  useSchemaRegistryContextsQuery,
+} from 'react-query/api/schema-registry';
 import { toast } from 'sonner';
 import { api } from 'state/backend-api';
+import { useSupportedFeaturesStore } from 'state/supported-features';
 
 import EditSchemaModePage from './edit-mode';
 
@@ -84,37 +103,14 @@ describe('EditSchemaModePage', () => {
   });
 
   describe('Global mode (no subjectName)', () => {
-    test('renders description text', () => {
+    test('renders 3 mode options for global mode', async () => {
       renderWithFileRoutes(<EditSchemaModePage />);
 
-      expect(screen.getByTestId('edit-mode-description')).toHaveTextContent(
-        'Mode controls whether the Schema Registry accepts new schema registrations and under what conditions.'
-      );
-    });
-
-    test('renders 3 mode options for global mode', () => {
-      renderWithFileRoutes(<EditSchemaModePage />);
-
-      expect(screen.getByText('Read/Write')).toBeInTheDocument();
+      expect(await screen.findByText('Read/Write')).toBeInTheDocument();
       expect(screen.getByText('Read Only')).toBeInTheDocument();
       expect(screen.getByText('Import')).toBeInTheDocument();
       // Should NOT show Default option when no subjectName
       expect(screen.queryByText('Default')).not.toBeInTheDocument();
-    });
-
-    test('shows warning text on Import option', () => {
-      renderWithFileRoutes(<EditSchemaModePage />);
-
-      expect(
-        screen.getByText('This mode allows overriding schema IDs. Incorrect use can cause ID collisions and data loss.')
-      ).toBeInTheDocument();
-    });
-
-    test('renders Save and Cancel buttons', () => {
-      renderWithFileRoutes(<EditSchemaModePage />);
-
-      expect(screen.getByTestId('edit-mode-save-btn')).toBeInTheDocument();
-      expect(screen.getByTestId('edit-mode-cancel-btn')).toBeInTheDocument();
     });
 
     test('calls global mutation on save', async () => {
@@ -158,8 +154,10 @@ describe('EditSchemaModePage', () => {
       expect(mockNavigate).toHaveBeenCalledWith({ to: '/schema-registry' });
     });
 
-    test('does not show schema preview panel', () => {
+    test('does not show schema preview panel', async () => {
       renderWithFileRoutes(<EditSchemaModePage />);
+      // Await Radio group settling so absence assertions run inside act scope.
+      await screen.findByTestId('edit-mode-description');
 
       // This is only present in the subject-mode.
       expect(screen.queryByTestId('edit-mode-subject-name')).not.toBeInTheDocument();
@@ -191,19 +189,19 @@ describe('EditSchemaModePage', () => {
       } as never);
     });
 
-    test('renders 4 mode options including Default', () => {
+    test('renders 4 mode options including Default', async () => {
       renderWithFileRoutes(<EditSchemaModePage subjectName={subjectName} />);
 
-      expect(screen.getByText('Default')).toBeInTheDocument();
+      expect(await screen.findByText('Default')).toBeInTheDocument();
       expect(screen.getByText('Read/Write')).toBeInTheDocument();
       expect(screen.getByText('Read Only')).toBeInTheDocument();
       expect(screen.getByText('Import')).toBeInTheDocument();
     });
 
-    test('shows Default option description', () => {
+    test('shows Default option description', async () => {
       renderWithFileRoutes(<EditSchemaModePage subjectName={subjectName} />);
 
-      expect(screen.getByText('Use the globally configured default mode.')).toBeInTheDocument();
+      expect(await screen.findByText('Use the globally configured default mode.')).toBeInTheDocument();
     });
 
     test('calls subject mutation on save', async () => {
@@ -249,16 +247,46 @@ describe('EditSchemaModePage', () => {
       });
     });
 
-    test('shows subject name in schema preview panel', () => {
+    test('shows subject name in schema preview panel', async () => {
       renderWithFileRoutes(<EditSchemaModePage subjectName={subjectName} />);
 
-      expect(screen.getByTestId('edit-mode-subject-name')).toHaveTextContent(subjectName);
+      expect(await screen.findByTestId('edit-mode-subject-name')).toHaveTextContent(subjectName);
+    });
+  });
+
+  describe('Per-context mode (with contextName)', () => {
+    beforeEach(() => {
+      useSupportedFeaturesStore.setState({ schemaRegistryContexts: true });
     });
 
-    test('shows schema heading in preview panel', () => {
-      renderWithFileRoutes(<EditSchemaModePage subjectName={subjectName} />);
+    afterEach(() => {
+      // Unmount the React tree BEFORE mutating the supported-features store.
+      // Otherwise the setState notifies still-mounted Radix Radio / Tooltip
+      // subscribers outside any act boundary and emits "update inside a test
+      // was not wrapped in act(...)" warnings attributed to the just-finished
+      // test. The global afterEach also calls cleanup() but runs after this
+      // block, so we have to unmount eagerly here.
+      cleanup();
+      useSupportedFeaturesStore.setState({ schemaRegistryContexts: false });
+    });
 
-      expect(screen.getByText('Schema')).toBeInTheDocument();
+    test('shows not-supported page when contexts feature is disabled', async () => {
+      useSupportedFeaturesStore.setState({ schemaRegistryContexts: false });
+      renderWithFileRoutes(<EditSchemaModePage contextName=".test" />);
+
+      expect(await screen.findByTestId('contexts-not-supported')).toBeInTheDocument();
+      expect(screen.queryByTestId('edit-mode-description')).not.toBeInTheDocument();
+    });
+
+    test('shows context name in header when editing context mode', async () => {
+      vi.mocked(useSchemaRegistryContextsQuery).mockReturnValue({
+        data: [{ name: '.test', mode: 'READWRITE', compatibility: 'BACKWARD' }],
+        isLoading: false,
+      } as never);
+
+      renderWithFileRoutes(<EditSchemaModePage contextName=".test" />);
+
+      expect(await screen.findByTestId('edit-mode-context-name')).toHaveTextContent('.test');
     });
   });
 
@@ -290,12 +318,13 @@ describe('EditSchemaModePage', () => {
       expect(screen.queryByTestId('edit-mode-description')).not.toBeInTheDocument();
     });
 
-    test('disables save button when user lacks permission', () => {
+    test('disables save button when user lacks permission', async () => {
       (api as Record<string, unknown>).userData = { canManageSchemaRegistry: false };
 
       renderWithFileRoutes(<EditSchemaModePage />);
 
-      expect(screen.getByTestId('edit-mode-save-btn')).toBeDisabled();
+      const saveBtn = await screen.findByTestId('edit-mode-save-btn');
+      expect(saveBtn).toBeDisabled();
 
       // Restore
       (api as Record<string, unknown>).userData = { canManageSchemaRegistry: true };

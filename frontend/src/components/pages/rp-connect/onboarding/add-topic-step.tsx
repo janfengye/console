@@ -2,6 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { createConnectQueryKey } from '@connectrpc/connect-query';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useQueryClient } from '@tanstack/react-query';
+import { Alert, AlertDescription } from 'components/redpanda-ui/components/alert';
 import { Button } from 'components/redpanda-ui/components/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from 'components/redpanda-ui/components/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from 'components/redpanda-ui/components/collapsible';
@@ -24,6 +25,7 @@ import { ListTopicsRequestSchema } from 'protogen/redpanda/api/dataplane/v1/topi
 import { listTopics } from 'protogen/redpanda/api/dataplane/v1/topic-TopicService_connectquery';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
+import { useGetKafkaInfoQuery } from 'react-query/api/cluster-status';
 import { useLegacyListTopicsQuery } from 'react-query/api/topic';
 import { LONG_LIVED_CACHE_STALE_TIME } from 'react-query/react-query.utils';
 import { isFalsy } from 'utils/falsy';
@@ -48,11 +50,26 @@ import { isUsingDefaultRetentionSettings, parseTopicConfigFromExisting, TOPIC_FO
 
 type AddTopicStepProps = {
   defaultTopicName?: string;
+  hideInternal?: boolean;
   onValidityChange?: (isValid: boolean) => void;
+  selectionMode?: 'existing' | 'new' | 'both';
+  hideTitle?: boolean;
+  className?: string;
 };
 
 export const AddTopicStep = forwardRef<BaseStepRef<AddTopicFormData>, AddTopicStepProps & MotionProps>(
-  ({ defaultTopicName, onValidityChange, ...motionProps }, ref) => {
+  (
+    {
+      defaultTopicName,
+      hideInternal = true,
+      onValidityChange,
+      selectionMode = 'both',
+      hideTitle,
+      className,
+      ...motionProps
+    },
+    ref
+  ) => {
     const queryClient = useQueryClient();
 
     const { data: topicList } = useLegacyListTopicsQuery(create(ListTopicsRequestSchema, {}), {
@@ -65,33 +82,59 @@ export const AddTopicStep = forwardRef<BaseStepRef<AddTopicFormData>, AddTopicSt
 
     const topicOptions = useMemo(
       () =>
-        topicList?.topics?.map((topic) => ({
-          value: topic.topicName,
-          label: topic.topicName,
-        })) ?? [],
-      [topicList]
+        topicList?.topics
+          ?.filter((topic) => !(hideInternal && topic.topicName.startsWith('__')))
+          .map((topic) => ({
+            value: topic.topicName,
+            label: topic.topicName,
+          })) ?? [],
+      [topicList, hideInternal]
     );
 
-    const [topicSelectionType, setTopicSelectionType] = useState<CreatableSelectionType>(
-      topicList?.topics?.length === 0 ? CreatableSelectionOptions.CREATE : CreatableSelectionOptions.EXISTING
-    );
+    const [topicSelectionType, setTopicSelectionType] = useState<CreatableSelectionType>(() => {
+      if (selectionMode === 'new') {
+        return CreatableSelectionOptions.CREATE;
+      }
+      if (selectionMode === 'existing') {
+        return CreatableSelectionOptions.EXISTING;
+      }
+      return topicList?.topics?.length === 0 ? CreatableSelectionOptions.CREATE : CreatableSelectionOptions.EXISTING;
+    });
 
     const createTopicMutation = useCreateTopicMutation();
 
     const isPending = createTopicMutation.isPending;
 
+    // The RF field is readOnly in advanced-topic-settings, so the default is
+    // also the final value. Clamp to broker count so single-broker clusters
+    // (e.g. local-byoc) don't hit "not enough replicas" on CreateTopic.
+    const { data: kafkaInfo } = useGetKafkaInfoQuery();
+    const brokersOnline = kafkaInfo?.brokersOnline ?? 0;
+    const defaultReplicationFactor =
+      brokersOnline > 0
+        ? Math.min(TOPIC_FORM_DEFAULTS.replicationFactor, brokersOnline)
+        : TOPIC_FORM_DEFAULTS.replicationFactor;
+
     const defaultValues = useMemo(
       () => ({
         ...TOPIC_FORM_DEFAULTS,
+        replicationFactor: defaultReplicationFactor,
         topicName: defaultTopicName || TOPIC_FORM_DEFAULTS.topicName,
       }),
-      [defaultTopicName]
+      [defaultTopicName, defaultReplicationFactor]
     );
 
+    // Pass defaultValues AND values so react-hook-form reactively updates
+    // replicationFactor when the KafkaInfo query resolves after mount. The
+    // `values` prop is rhf's built-in mechanism for external reactive state;
+    // `keepDirtyValues` prevents fields the user has already touched from
+    // being overwritten when kafkaInfo lands late.
     const form = useForm<AddTopicFormData>({
       resolver: zodResolver(addTopicFormSchema),
       mode: 'onChange',
       defaultValues,
+      values: defaultValues,
+      resetOptions: { keepDirtyValues: true },
     });
 
     const watchedTopicName = useWatch({
@@ -118,10 +161,15 @@ export const AddTopicStep = forwardRef<BaseStepRef<AddTopicFormData>, AddTopicSt
     );
 
     useEffect(() => {
-      if (!existingTopicSelected) return;
+      if (!existingTopicSelected) {
+        return;
+      }
       if (topicConfig && !topicConfig.error) {
         const allTopicValues = parseTopicConfigFromExisting(existingTopicSelected, topicConfig);
-        form.reset(allTopicValues, { keepDefaultValues: false });
+        // Override the form-level `keepDirtyValues: true` default — when a user
+        // selects an existing topic, its config must fully replace any partial
+        // input they've made.
+        form.reset(allTopicValues, { keepDefaultValues: false, keepDirtyValues: false });
       } else {
         form.setValue('topicName', existingTopicSelected.topicName, {
           shouldDirty: false,
@@ -184,7 +232,7 @@ export const AddTopicStep = forwardRef<BaseStepRef<AddTopicFormData>, AddTopicSt
 
           return {
             success: true,
-            message: `Created topic "${data.topicName}" successfully!`,
+            message: `Topic "${data.topicName}" created`,
             data,
           };
         } catch (error) {
@@ -211,32 +259,44 @@ export const AddTopicStep = forwardRef<BaseStepRef<AddTopicFormData>, AddTopicSt
     }, [form]);
 
     useImperativeHandle(ref, () => ({
-      triggerSubmit: async () => {
+      triggerSubmit: async (signal?: AbortSignal) => {
+        if (signal?.aborted) {
+          return { success: false };
+        }
         const isValid = await form.trigger();
+        if (signal?.aborted) {
+          return { success: false };
+        }
         if (isValid) {
           const data = form.getValues();
           return handleSubmit(data);
         }
         return {
           success: false,
-          message: 'Please fix the form errors before proceeding',
+          message: 'Fix the form errors before proceeding',
           error: 'Form validation failed',
         };
       },
       isPending,
     }));
 
+    // Show info alert when user types a name that matches an existing topic in "new" mode
+    const showExistingTopicAlert =
+      topicSelectionType === CreatableSelectionOptions.CREATE && Boolean(existingTopicSelected);
+
     return (
-      <Card size="full" {...motionProps} animated>
-        <CardHeader className="max-w-2xl">
-          <CardTitle>
-            <Heading level={2}>Read or write data from a topic</Heading>
-          </CardTitle>
-          <CardDescription className="mt-4">
-            Select or create a topic to store data for this streaming pipeline. A topic can have multiple clients
-            writing data to it (producers) and reading data from it (consumers).
-          </CardDescription>
-        </CardHeader>
+      <Card size="full" {...motionProps} animated className={className} variant="ghost">
+        {!hideTitle && (
+          <CardHeader className="max-w-2xl">
+            <CardTitle>
+              <Heading level={2}>Read or write data from a topic</Heading>
+            </CardTitle>
+            <CardDescription className="mt-4">
+              Select or create a topic to store data for this streaming pipeline. A topic can have multiple clients
+              writing data to it (producers) and reading data from it (consumers).
+            </CardDescription>
+          </CardHeader>
+        )}
         <CardContent className="min-h-[300px]">
           <Form {...form}>
             <div className="mt-4 max-w-2xl space-y-6">
@@ -246,26 +306,31 @@ export const AddTopicStep = forwardRef<BaseStepRef<AddTopicFormData>, AddTopicSt
                   Choose an existing topic to read or write data from, or create a new topic.
                 </FormDescription>
                 <div className="flex flex-col items-start gap-2">
-                  <ToggleGroup
-                    disabled={isPending}
-                    onValueChange={(value) => {
-                      // Prevent deselection - ToggleGroup emits empty string when trying to deselect
-                      if (!value) {
-                        return;
-                      }
-                      handleTopicSelectionTypeChange(value as CreatableSelectionType);
-                    }}
-                    type="single"
-                    value={topicSelectionType}
-                    variant="outline"
-                  >
-                    <ToggleGroupItem id={CreatableSelectionOptions.EXISTING} value={CreatableSelectionOptions.EXISTING}>
-                      Existing
-                    </ToggleGroupItem>
-                    <ToggleGroupItem id={CreatableSelectionOptions.CREATE} value={CreatableSelectionOptions.CREATE}>
-                      New
-                    </ToggleGroupItem>
-                  </ToggleGroup>
+                  {selectionMode === 'both' && (
+                    <ToggleGroup
+                      disabled={isPending}
+                      onValueChange={(value) => {
+                        // Prevent deselection - ToggleGroup emits empty string when trying to deselect
+                        if (!value) {
+                          return;
+                        }
+                        handleTopicSelectionTypeChange(value as CreatableSelectionType);
+                      }}
+                      type="single"
+                      value={topicSelectionType}
+                      variant="outline"
+                    >
+                      <ToggleGroupItem
+                        id={CreatableSelectionOptions.EXISTING}
+                        value={CreatableSelectionOptions.EXISTING}
+                      >
+                        Existing
+                      </ToggleGroupItem>
+                      <ToggleGroupItem id={CreatableSelectionOptions.CREATE} value={CreatableSelectionOptions.CREATE}>
+                        New
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                  )}
 
                   <div className="flex gap-2">
                     <FormField
@@ -310,6 +375,15 @@ export const AddTopicStep = forwardRef<BaseStepRef<AddTopicFormData>, AddTopicSt
                       </Button>
                     )}
                   </div>
+
+                  {showExistingTopicAlert ? (
+                    <Alert variant="info">
+                      <AlertDescription>
+                        A topic named <b>{watchedTopicName}</b> already exists. A reference to the existing topic will
+                        be used.
+                      </AlertDescription>
+                    </Alert>
+                  ) : null}
                 </div>
               </div>
 

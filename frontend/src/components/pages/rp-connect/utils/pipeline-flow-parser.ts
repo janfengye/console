@@ -14,6 +14,7 @@ import { MarkerType } from '@xyflow/react';
 import { parse as parseYaml } from 'yaml';
 
 import { firstKey, parseMultiInputs, parseMultiOutputs } from './yaml';
+import { REDPANDA_TOPIC_AND_USER_COMPONENTS } from '../types/constants';
 
 // ============================================================================
 // Types
@@ -32,6 +33,8 @@ type ParsedYamlConfig = {
   redpanda?: Record<string, unknown>;
 };
 
+const REDPANDA_COMPONENTS: ReadonlySet<string> = new Set(REDPANDA_TOPIC_AND_USER_COMPONENTS);
+
 export type FlowNodeKind = 'section' | 'group' | 'leaf';
 
 export type PipelineFlowNode = {
@@ -43,6 +46,8 @@ export type PipelineFlowNode = {
   section?: 'input' | 'processor' | 'output' | 'resource';
   parentId?: string;
   collapsible?: boolean;
+  missingTopic?: boolean;
+  missingSasl?: boolean;
 };
 
 type BranchContext = {
@@ -104,7 +109,38 @@ function extractTopics(componentConfig: unknown): string[] | undefined {
   return;
 }
 
-function parseInputNodes(inputObj: Record<string, unknown>, sectionId: string): PipelineFlowNode[] {
+function hasNonEmptySasl(obj: unknown): boolean {
+  if (!obj || typeof obj !== 'object') {
+    return false;
+  }
+  const sasl = (obj as Record<string, unknown>).sasl;
+  if (!sasl) {
+    return false;
+  }
+  if (Array.isArray(sasl)) {
+    return sasl.length > 0;
+  }
+  if (typeof sasl === 'object') {
+    return Object.keys(sasl as object).length > 0;
+  }
+  return false;
+}
+
+function hasSaslConfig(componentConfig: unknown, rootConfig: ParsedYamlConfig): boolean {
+  if (hasNonEmptySasl(componentConfig)) {
+    return true;
+  }
+  if (hasNonEmptySasl(rootConfig.redpanda)) {
+    return true;
+  }
+  return false;
+}
+
+function parseInputNodes(
+  inputObj: Record<string, unknown>,
+  sectionId: string,
+  config: ParsedYamlConfig
+): PipelineFlowNode[] {
   const inputKey = firstKey(inputObj);
   if (!inputKey) {
     return [];
@@ -120,7 +156,20 @@ function parseInputNodes(inputObj: Record<string, unknown>, sectionId: string): 
 
   const labelText = extractLabel(inputObj);
   const topics = extractTopics(inputObj[inputKey]);
-  return [{ id: 'input-0', kind: 'leaf', label: inputKey, labelText, topics, section: 'input', parentId: sectionId }];
+  const isRedpanda = REDPANDA_COMPONENTS.has(inputKey);
+  return [
+    {
+      id: 'input-0',
+      kind: 'leaf',
+      label: inputKey,
+      labelText,
+      topics,
+      section: 'input',
+      parentId: sectionId,
+      missingTopic: isRedpanda && !topics ? true : undefined,
+      missingSasl: isRedpanda && !hasSaslConfig(inputObj[inputKey], config) ? true : undefined,
+    },
+  ];
 }
 
 const BRANCHING_FIELDS = new Set([
@@ -405,7 +454,11 @@ function parseResourceNodes(config: ParsedYamlConfig, sectionId: string): Pipeli
   return nodes;
 }
 
-function parseOutputNodes(outputObj: Record<string, unknown>, sectionId: string): PipelineFlowNode[] {
+function parseOutputNodes(
+  outputObj: Record<string, unknown>,
+  sectionId: string,
+  config: ParsedYamlConfig
+): PipelineFlowNode[] {
   const outputKey = firstKey(outputObj);
   if (!outputKey) {
     return [];
@@ -421,8 +474,19 @@ function parseOutputNodes(outputObj: Record<string, unknown>, sectionId: string)
 
   const labelText = extractLabel(outputObj);
   const topics = extractTopics(outputObj[outputKey]);
+  const isRedpanda = REDPANDA_COMPONENTS.has(outputKey);
   return [
-    { id: 'output-0', kind: 'leaf', label: outputKey, labelText, topics, section: 'output', parentId: sectionId },
+    {
+      id: 'output-0',
+      kind: 'leaf',
+      label: outputKey,
+      labelText,
+      topics,
+      section: 'output',
+      parentId: sectionId,
+      missingTopic: isRedpanda && !topics ? true : undefined,
+      missingSasl: isRedpanda && !hasSaslConfig(outputObj[outputKey], config) ? true : undefined,
+    },
   ];
 }
 
@@ -434,7 +498,7 @@ function buildInputSection(nodes: PipelineFlowNode[], config: ParsedYamlConfig):
   const sectionId = 'section-input';
   nodes.push({ id: sectionId, kind: 'section', label: 'input', section: 'input' });
   if (config.input && typeof config.input === 'object') {
-    nodes.push(...parseInputNodes(config.input as Record<string, unknown>, sectionId));
+    nodes.push(...parseInputNodes(config.input as Record<string, unknown>, sectionId, config));
   } else {
     nodes.push({ id: 'input-placeholder', kind: 'leaf', label: 'none', section: 'input', parentId: sectionId });
   }
@@ -463,7 +527,7 @@ function buildOutputSection(nodes: PipelineFlowNode[], config: ParsedYamlConfig)
   const sectionId = 'section-output';
   nodes.push({ id: sectionId, kind: 'section', label: 'output', section: 'output' });
   if (config.output && typeof config.output === 'object') {
-    nodes.push(...parseOutputNodes(config.output as Record<string, unknown>, sectionId));
+    nodes.push(...parseOutputNodes(config.output as Record<string, unknown>, sectionId, config));
   } else {
     nodes.push({ id: 'output-placeholder', kind: 'leaf', label: 'none', section: 'output', parentId: sectionId });
   }
@@ -525,6 +589,7 @@ export function parsePipelineFlowTree(
 // ============================================================================
 
 const INDENT_X = 40;
+export const MAX_NESTING_DEPTH = 5;
 const NODE_H_DEFAULT = 28;
 const NODE_H_LEAF = 36;
 const ROW_GAP = 8;
@@ -541,6 +606,7 @@ type LayoutState = {
   rfNodes: Node[];
   rfEdges: Edge[];
   y: number;
+  maxDepth: number;
   childrenMap: Map<string | undefined, PipelineFlowNode[]>;
   collapsedIds: ReadonlySet<string>;
 };
@@ -550,10 +616,23 @@ type RfNodeParams = {
   depth: number;
   nodeY: number;
   isHidden: boolean;
+  isCollapsed: boolean;
 };
 
+function countDescendants(nodeId: string, childrenMap: Map<string | undefined, PipelineFlowNode[]>): number {
+  const children = childrenMap.get(nodeId);
+  if (!children) {
+    return 0;
+  }
+  let count = children.length;
+  for (const child of children) {
+    count += countDescendants(child.id, childrenMap);
+  }
+  return count;
+}
+
 function createRfNode(params: RfNodeParams, state: LayoutState): Node {
-  const { node, depth, nodeY, isHidden } = params;
+  const { node, depth, nodeY, isHidden, isCollapsed } = params;
   return {
     id: node.id,
     type: NODE_TYPE_MAP[node.kind],
@@ -565,11 +644,14 @@ function createRfNode(params: RfNodeParams, state: LayoutState): Node {
     },
     data: {
       label: node.label,
-      collapsed: state.collapsedIds.has(node.id),
+      collapsed: isCollapsed,
       collapsible: node.collapsible ?? false,
       ...(node.labelText ? { labelText: node.labelText } : {}),
       ...(node.topics ? { topics: node.topics } : {}),
-      ...(state.collapsedIds.has(node.id) ? { childCount: state.childrenMap.get(node.id)?.length ?? 0 } : {}),
+      ...(node.section ? { section: node.section } : {}),
+      ...(node.missingTopic ? { missingTopic: true } : {}),
+      ...(node.missingSasl ? { missingSasl: true } : {}),
+      ...(isCollapsed ? { childCount: countDescendants(node.id, state.childrenMap) } : {}),
     },
   };
 }
@@ -599,8 +681,26 @@ function layoutDfs(params: DfsParams, state: LayoutState): void {
     state.y += SECTION_GAP;
   }
 
+  if (depth > state.maxDepth) {
+    state.maxDepth = depth;
+  }
+
+  const autoCollapsed = node.kind === 'group' && depth >= MAX_NESTING_DEPTH;
+  const isCollapsed = state.collapsedIds.has(node.id) || autoCollapsed;
+
   const nodeY = hiddenByParent ? snapY : state.y;
-  state.rfNodes.push(createRfNode({ node, depth, nodeY, isHidden: hiddenByParent }, state));
+  state.rfNodes.push(
+    createRfNode(
+      {
+        node: autoCollapsed ? { ...node, collapsible: false } : node,
+        depth,
+        nodeY,
+        isHidden: hiddenByParent,
+        isCollapsed,
+      },
+      state
+    )
+  );
 
   if (node.parentId) {
     state.rfEdges.push(createTreeEdge(node.parentId, node, hiddenByParent));
@@ -613,7 +713,7 @@ function layoutDfs(params: DfsParams, state: LayoutState): void {
 
   const children = state.childrenMap.get(node.id);
   if (children) {
-    const childHidden = hiddenByParent || state.collapsedIds.has(node.id);
+    const childHidden = hiddenByParent || isCollapsed;
     for (const child of children) {
       layoutDfs({ node: child, depth: depth + 1, hiddenByParent: childHidden, snapY: nodeY }, state);
     }
@@ -623,9 +723,9 @@ function layoutDfs(params: DfsParams, state: LayoutState): void {
 export function computeTreeLayout(
   nodes: PipelineFlowNode[],
   collapsedIds: ReadonlySet<string> = new Set()
-): { rfNodes: Node[]; rfEdges: Edge[]; height: number } {
+): { rfNodes: Node[]; rfEdges: Edge[]; height: number; maxDepth: number } {
   if (nodes.length === 0) {
-    return { rfNodes: [], rfEdges: [], height: 200 };
+    return { rfNodes: [], rfEdges: [], height: 200, maxDepth: 0 };
   }
 
   const childrenMap = new Map<string | undefined, PipelineFlowNode[]>();
@@ -638,7 +738,7 @@ export function computeTreeLayout(
     }
   }
 
-  const state: LayoutState = { rfNodes: [], rfEdges: [], y: 0, childrenMap, collapsedIds };
+  const state: LayoutState = { rfNodes: [], rfEdges: [], y: 0, maxDepth: 0, childrenMap, collapsedIds };
 
   const roots = childrenMap.get(undefined);
   if (roots) {
@@ -660,5 +760,10 @@ export function computeTreeLayout(
   }
 
   const MIN_HEIGHT = 200;
-  return { rfNodes: state.rfNodes, rfEdges: state.rfEdges, height: Math.max(MIN_HEIGHT, state.y + 8) };
+  return {
+    rfNodes: state.rfNodes,
+    rfEdges: state.rfEdges,
+    height: Math.max(MIN_HEIGHT, state.y + 8),
+    maxDepth: state.maxDepth,
+  };
 }
