@@ -28,7 +28,19 @@ import { Spinner } from 'components/redpanda-ui/components/spinner';
 import { StatusDot } from 'components/redpanda-ui/components/status-dot';
 import { InlineCode, Text } from 'components/redpanda-ui/components/typography';
 import { cn } from 'components/redpanda-ui/lib/utils';
-import { Braces, CircleX, Clock, Database, Download, GitMerge, Plus, Rows3, Terminal, X } from 'lucide-react';
+import {
+  Braces,
+  CircleX,
+  Clock,
+  Database,
+  Download,
+  GitMerge,
+  Lightbulb,
+  Plus,
+  Rows3,
+  Terminal,
+  X,
+} from 'lucide-react';
 import { createContext, useContext, useMemo, useState } from 'react';
 import DataGrid, { type Column } from 'react-data-grid';
 import { isMacOS } from 'utils/platform';
@@ -145,18 +157,20 @@ function JsonCellPopover({ value, name, typeLabel }: { value: string; name: stri
   const pretty = useMemo(() => prettyJson(value), [value]);
   return (
     <Popover onOpenChange={setOpen} open={open}>
-      <PopoverTrigger asChild>
-        <button
-          className={cn(
-            'block cursor-pointer truncate text-left font-mono underline decoration-dotted underline-offset-2',
-            CELL_MAX_W
-          )}
-          title="Show JSON"
-          type="button"
-        >
-          {value}
-        </button>
-      </PopoverTrigger>
+      <PopoverTrigger
+        render={
+          <button
+            className={cn(
+              'block cursor-pointer truncate text-left font-mono underline decoration-dotted underline-offset-2',
+              CELL_MAX_W
+            )}
+            title="Show JSON"
+            type="button"
+          >
+            {value}
+          </button>
+        }
+      />
       <PopoverContent
         align="start"
         className="pointer-events-auto w-120 max-w-[90vw] overflow-hidden p-0"
@@ -215,18 +229,20 @@ function CellContent({
   }
   return (
     <Popover>
-      <PopoverTrigger asChild>
-        <button
-          className={cn(
-            'block cursor-pointer truncate text-left underline decoration-dotted underline-offset-2',
-            CELL_MAX_W
-          )}
-          title="Show full value"
-          type="button"
-        >
-          {s}
-        </button>
-      </PopoverTrigger>
+      <PopoverTrigger
+        render={
+          <button
+            className={cn(
+              'block cursor-pointer truncate text-left underline decoration-dotted underline-offset-2',
+              CELL_MAX_W
+            )}
+            title="Show full value"
+            type="button"
+          >
+            {s}
+          </button>
+        }
+      />
       <PopoverContent
         align="start"
         className="pointer-events-auto max-h-72 max-w-120 overflow-auto p-3"
@@ -472,14 +488,17 @@ export function SqlResults({ run, sqlRole, onAddTable, hasTables = true }: SqlRe
           <AlertDescription>{run.message}</AlertDescription>
         </Alert>
         {run.hint ? (
-          <div className="flex items-center gap-3 text-muted-foreground text-sm">
-            {run.hint}
-            {run.hintAction && sqlRole === 'admin' && onAddTable ? (
-              <Button onClick={onAddTable} size="sm" variant="primary">
-                <Plus size={14} /> Add a topic to SQL
-              </Button>
-            ) : null}
-          </div>
+          <Alert icon={<Lightbulb />} variant="info">
+            <AlertTitle>Hint</AlertTitle>
+            <AlertDescription>
+              {run.hint}
+              {run.hintAction && sqlRole === 'admin' && onAddTable ? (
+                <Button onClick={onAddTable} size="sm" variant="primary">
+                  <Plus size={14} /> Add a topic to SQL
+                </Button>
+              ) : null}
+            </AlertDescription>
+          </Alert>
         ) : null}
       </div>
     );
