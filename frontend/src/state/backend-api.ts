@@ -109,6 +109,7 @@ import {
   type UserData,
   WrappedApiError,
 } from './rest-interfaces';
+import { rpcnEditorAutosave } from './rpcn-editor-autosave';
 import { Features, useSupportedFeaturesStore } from './supported-features';
 import { PartitionOffsetOrigin } from './ui';
 import { uiState } from './ui-state';
@@ -472,6 +473,8 @@ const _apiCreator = (set: any, get: any) => ({
 
   async logout() {
     await appConfig.fetch('./auth/logout');
+    // Recovery buffers hold unsaved configuration verbatim; they must not outlive the session.
+    rpcnEditorAutosave.clearAll();
     set({ userData: null });
   },
   async refreshUserData() {
@@ -2588,6 +2591,7 @@ export function createMessageSearch() {
       req.ignoreMaxSizeLimit = searchRequest.ignoreSizeLimit ?? false;
       req.keyDeserializer = searchRequest.keyDeserializer;
       req.valueDeserializer = searchRequest.valueDeserializer;
+      req.schemaContext = searchRequest.schemaContext ?? '';
 
       // For StartOffset = Newest and any set push-down filter we need to bump the default timeout
       // from 30s to 30 minutes before ending the request gracefully.
@@ -2864,6 +2868,7 @@ export type MessageSearchRequest = {
 
   keyDeserializer?: PayloadEncoding;
   valueDeserializer?: PayloadEncoding;
+  schemaContext?: string; // '' resolves the topic's context, '.' forces the default.
 };
 
 async function parseOrUnwrap<T>(response: Response, text: string | null): Promise<T> {
